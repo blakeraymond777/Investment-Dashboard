@@ -1,5 +1,7 @@
 import sqlite3
 from datetime import datetime
+import requests
+import os
 
 # Declare class variables
 
@@ -45,36 +47,59 @@ def connect():
     db_connection = sqlite3.connect("finance_data.db")
     return db_connection
 
-# pull all fund and portfolio information into memory
-def load_funds_from_cache(funds_to_get, connection=None):
-    if connection is None:
-        connection = connect()
+# determine the sec url to use for the fund by checking local and then programmatically searching EDGAR if needed
+# [MVP]: lookup into dictionary/database, no handling if fund not found
+def fetch_nport_from_sec_url(fund_ticker):
+    email = os.getenv("USER_AGENT_EMAIL")
 
-    cursor = connection.cursor()
+    # check if we have a url already but are just missing the nport
+    url = get_sec_url(fund_ticker)
+    if url is None:
+        return None
+
+    # Fetch the file
+    headers = {"User-Agent": f"PersonalInvestmentApp {email}"}
+    response = requests.get(url, headers=headers)
+    
+    return response.text
+
+# pull all fund and portfolio information into memory
+def load_funds_from_cache(funds_to_get, existing_connection=None):
+    conn = existing_connection
+    if conn is None:
+        conn = connect()
+
+    cursor = conn.cursor()
 
     placeholders = ", ".join("?" * len(funds_to_get))
     cursor.execute(f"SELECT ticker, nport_document FROM funds where ticker in ({placeholders})", funds_to_get)
     
     funds = dict(cursor.fetchall())
+
+    if existing_connection is None:
+        conn.close()
+    
     return funds
 
-def load_user_portfolio(user, connection=None):
-    if connection is None:
-        connection = connect()
+def load_user_portfolio(user, existing_connection=None):
+    conn = existing_connection
+    if conn is None:
+        conn = connect()
 
-    cursor = connection.cursor()
+    cursor = conn.cursor()
 
     cursor.execute("SELECT fund, amount FROM portfolios WHERE user = ?", (user,))
     portfolio = cursor.fetchall()
+
+    if existing_connection is None:
+        conn.close()
 
     return portfolio
 
 # create the database tables while not conflicting with existing records
 # can be run repeatedly without consequence
-def initialize_tables(connection=None):
-    if connection is None:
-        connection = connect()
-
+def initialize_tables():
+    connection = connect()
     cursor = connection.cursor()
 
     delete_table("portfolios")
@@ -93,19 +118,20 @@ def initialize_tables(connection=None):
 
     # Portfolios
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS portfolios (
+    CREATE TABLE portfolios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fund TEXT NOT NULL,
         amount INTEGER NOT NULL,
         user INTEGER NOT NULL
     )
     """)
+    print("Created new portfolios table")
 
     # Insert data
     cursor.executemany("INSERT OR IGNORE INTO funds (ticker, sec_url) VALUES (?, ?)", FUNDS.items())
     cursor.executemany("INSERT OR REPLACE INTO portfolios (fund, amount, user) VALUES (?, ?, ?)", MOCK_PORTFOLIOS)
 
-    print("Successfully freshened database tables")
+    print("Successfully refreshed database tables")
 
     connection.commit()
     connection.close()
@@ -144,28 +170,40 @@ def update_existing_fund(ticker, sec_url=None, nport_document=None, existing_con
 
     return
 
-def delete_table(table, connection=None):
-    if connection is None:
-        connection = connect()
+def delete_table(table, existing_connection=None):
+    conn = existing_connection
+    if conn is None:
+        conn = connect()
 
-    cursor = connection.cursor()
+    cursor = conn.cursor()
 
     if table is not None:
         cursor.execute(f"DROP TABLE IF EXISTS {table}")
         print(f"Successfully deleted table: {table}")
+
+    # if we had no existing connection to the database, then close the local one we made for this function call
+    if existing_connection is None:
+        conn.close()
+
     return
 
-def get_sec_url(fund, connection=None):
-    if connection is None:
-        connection = connect()
+def get_sec_url(fund, existing_connection=None):
+    conn = existing_connection
+    if conn is None:
+        conn = connect()
 
-    cursor = connection.cursor()
+    cursor = conn.cursor()
+    
     cursor.execute("SELECT ticker, sec_url FROM funds WHERE ticker = ?", (fund,))
 
     url_result = cursor.fetchone()
     if url_result:
         return url_result[1]
     
+        # if we had no existing connection to the database, then close the local one we made for this function call
+    if existing_connection is None:
+        conn.close()
+
     return
 
 # delete all holding records for a specific user
@@ -178,7 +216,32 @@ def delete_user_portfolio(user, existing_connection=None):
         conn = connect()
 
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM portfolios WHERE ticker = ?", (user,))
+    cursor.execute("DELETE FROM portfolios WHERE user = ?", (user,))
+
+    return
+
+# insert a new record into the portfolio table representing a held position
+def insert_portfolio_position(fund, amount, user, existing_connection=None):
+    if fund is None:
+        raise ValueError("fund cannot be null")
+    if amount is None:
+        raise ValueError("amount cannot be null")
+    if user is None:
+        raise ValueError("user cannot be null")
+
+    conn = existing_connection
+    if conn is None:
+        conn = connect()
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO portfolios (fund, amount, user) VALUES (?, ?, ?)",
+        (fund, amount, user)
+    )
+    conn.commit()
+
+    if existing_connection is None:
+        conn.close()
 
     return
 
@@ -197,6 +260,3 @@ def delete_user_portfolio(user, existing_connection=None):
 
 #     return
 
-# insert a new record into the portfolio table representing a held position
-# def insert_portfolio():
-#     return
