@@ -1,5 +1,6 @@
 import re
-import data_utils
+import db_utils
+import data_scraping_utils
 import time
 from threading import Thread, Lock
 
@@ -13,8 +14,28 @@ FUNDS = {}
 LOCK = Lock()
 
 COMPANIES_TO_SEARCH_KEYS = ["Amazon.com Inc", "Another NA Company", "Netflix", "NA-Company!"]
-#COMPANIES_TO_SEARCH = dict.fromkeys(COMPANIES_TO_SEARCH_KEYS, 0.0)
 COMPANIES_TO_SEARCH = dict.fromkeys(COMPANIES_TO_SEARCH_KEYS, 0.0)
+
+# manage program timer
+def timer():
+    global START_TIME, END_TIME
+    if START_TIME is None:
+        START_TIME = time.perf_counter()
+    else:
+        END_TIME = time.perf_counter()
+        elapsed_time = END_TIME - START_TIME
+        print(f"\nExecution time: {elapsed_time:.4f} seconds\n")
+    return
+
+# nicely print results
+def print_exposures():
+    print("\n\n---------------------------------------")
+    print("| Companies with Calculated Exposures |")
+    print("---------------------------------------")
+    for company, amount in COMPANIES_TO_SEARCH.items():
+        print(f"{company} --> {"no exposure found" if amount == 0.0 else f"${amount}"}")
+    print("---------------------------------------")
+    return
 
 # use fund report filing to determine percentage weights of various company holdings and update cumulative portfolio table
 def calculate_company_exposures_for_fund(fund, num_shares):
@@ -27,14 +48,14 @@ def calculate_company_exposures_for_fund(fund, num_shares):
             print(f"Fund not found in database: {fund}")
             return
         case None:
-            nport = data_utils.fetch_nport_from_sec_url(fund)
+            nport = data_scraping_utils.fetch_nport_from_sec_url(fund)
             if nport is None:
                 print(f"Could not find an N-PORT filing for fund: {fund}. It will not be calculated in the results")
                 return
             else:
                 # update the existing record because we fetched a new document
                 print(f"updating cached nport document for database entry of fund {fund}")
-                data_utils.update_existing_fund(fund, None, nport)
+                db_utils.update_existing_fund(fund, None, nport)
         case _:
             print(f"Using cached nport document for fund {fund}!")
              
@@ -60,31 +81,14 @@ def calculate_company_exposures_for_fund(fund, num_shares):
         
     return
 
-# manage program timer
-def timer():
-    global START_TIME, END_TIME
-    if START_TIME is None:
-        START_TIME = time.perf_counter()
-    else:
-        END_TIME = time.perf_counter()
-    return
-
-# nicely print results
-def print_exposures():
-    print("\n\n---------------------------------------")
-    print("| Companies with Calculated Exposures |")
-    print("---------------------------------------")
-    for company, amount in COMPANIES_TO_SEARCH.items():
-        print(f"{company} --> {"no exposure found" if amount == 0.0 else f"${amount}"}")
-    print("---------------------------------------")
-    return
 
 def determine_portfolio_exposure():
+    timer()
     global FUNDS, COMPANIES_TO_SEARCH
 
-    db_connection = data_utils.connect()
+    db_connection = db_utils.connect()
 
-    PORTFOLIO = data_utils.load_user_portfolio(USER, db_connection)
+    PORTFOLIO = db_utils.load_user_portfolio(USER, db_connection)
     PORTFOLIO_FLATTENED = {}
 
     # flatten portfolio into dictionary of unique funds (consolidated) and cumulative number of shares held of each
@@ -94,7 +98,7 @@ def determine_portfolio_exposure():
     print(f"(User {USER}) flattened portfolio to calculate exposures for: {PORTFOLIO_FLATTENED}")
     print(f"Companies to check exposures to: {COMPANIES_TO_SEARCH_KEYS}\n")
 
-    FUNDS = data_utils.load_funds_from_cache(list(PORTFOLIO_FLATTENED.keys()), db_connection)
+    FUNDS = db_utils.load_funds_from_cache(list(PORTFOLIO_FLATTENED.keys()), db_connection)
 
     # loop through dictionary of positions and lookup each COMPANY_TO_SEARCH dictionary value into that fund and update cumulative total holding
     # for searching, use legal name for now, but can also use: LEI, ISIN, FIGI
@@ -111,19 +115,7 @@ def determine_portfolio_exposure():
     print_exposures()
 
     db_connection.close()
+    timer()
     
     return
 
-def main():
-    timer()
-
-    # for now, just run a single function, but use modularity to decide which to use as features are added
-    determine_portfolio_exposure()
-
-    timer()
-    if START_TIME and END_TIME is not None:
-        elapsed_time = END_TIME - START_TIME
-        print(f"\nExecution time: {elapsed_time:.4f} seconds\n")
-
-if __name__ == "__main__":
-    main()
