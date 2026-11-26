@@ -5,15 +5,21 @@ import finance_utils
 import data_scraping_utils
 
 USAGE = """
-Usage: python cli.py <command> [args]
+Usage: python cli.py command [<args>]
 
+  Commands:          Arguments:
   init-db
-  portfolio        <user_id>
-  add-holding      <user_id> <ticker> <shares>
-  delete-portfolio <user_id>
-  get-url          <ticker>
-  set-url          <ticker> <url>
-  exposures        <user_id> <company>/[company ...]
+  portfolio          <user_id>
+  add-holding        <user_id> <ticker> <shares>
+  delete-portfolio   <user_id>
+  get-url            <ticker>
+  set-url            <ticker> <url>
+  delete-table       <table_name>
+  get-company-data 
+  fetch-nport-url    <ticker>
+  fetch-nport-ticker <ticker/cik>
+  refresh
+  exposures          <user_id> <company>/[company ...]
 """
 
 def main():
@@ -69,19 +75,30 @@ def main():
         elif cmd == "exposures":
             user_id, companies = int(rest[0]), rest[1:]
             finance_utils.USER = user_id
-            finance_utils.COMPANIES_TO_SEARCH_KEYS = companies
-            finance_utils.COMPANIES_TO_SEARCH = dict.fromkeys(companies, 0.0)
+            if companies: # if blank, use a default test list of companies
+                finance_utils.COMPANIES_TO_SEARCH_KEYS = companies
+                finance_utils.COMPANIES_TO_SEARCH = dict.fromkeys(companies, 0.0)
             finance_utils.determine_portfolio_exposure()
 
         elif cmd == "get-company-data":
             data_scraping_utils.fetch_company_data()
 
-        elif cmd == "fetch-nport":
+        elif cmd == "fetch-nport-url":
             nport = data_scraping_utils.fetch_nport_from_sec_url(rest[0])
             if nport is None:
                 print(f"No URL found for {rest[0]}.")
                 sys.exit(1)
             print(nport)
+
+        # retrieve nport filing from ticker or CIK (uses unintegrated nport_fetcher.py code)
+        elif cmd == "fetch-nport-ticker":
+            txt_url, filing, text = data_scraping_utils.fetch_latest_nport_txt(rest[0])
+            out = f"nports/{filing['accessionNumber']}.txt"
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(text)
+            print(f"Form {filing['form']} filed {filing['filingDate']} (period {filing['reportDate']})")
+            print(f"URL:   {txt_url}")
+            print(f"Saved: {out}")
 
         elif cmd == "refresh":
             db_utils.refresh_all_fund_data()
@@ -90,11 +107,14 @@ def main():
             print(f"Unknown command: '{cmd}'.{USAGE}")
             sys.exit(1)
 
-    except (IndexError, ValueError):
-        print(f"Invalid arguments for '{cmd}'.{USAGE}")
+    # TODO make error messages more helpful
+    except (IndexError, ValueError) as e:
+        print(f"Error: {e}")
+        #print(f"Invalid arguments for '{cmd}'.{USAGE}")
         sys.exit(1)
-    except (TypeError):
-        print("Could not find composition data for Vanguard or Fidelity funds")
+    except (TypeError) as e:
+        print(f"Error: {e}")
+        #print("Could not find composition data for Vanguard or Fidelity funds")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\nAborted.")

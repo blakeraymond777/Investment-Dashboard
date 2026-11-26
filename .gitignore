@@ -1,7 +1,11 @@
+# directories
 .venv/
 .vscode/
 __pycache__/
+nports/
+temp_data/
 
+# root files
 *.db
 .env
 *.csv

@@ -62,11 +62,13 @@ def calculate_company_exposures_for_fund(fund, num_shares):
     # Parse all holdings of the fund into iterable sections
     fund_investments = re.findall(r'<invstOrSec>.*?</invstOrSec>', nport, re.DOTALL)
 
-    # loop through all fund_positions and check for each companie to search
+    # loop through all fund_positions and check for each of the companies to search
     for fund_position in fund_investments:
         for company in COMPANIES_TO_SEARCH_KEYS:
-            # [MVP]: search for just the "name" (ex: "Amazon.com Inc) within the report filing
+            
+            # TODO, if we do not find a name match, fallback to check ticker/cusip/cik instead by looking it up into the companies db
             name_match = re.search(re.escape(company), fund_position, re.IGNORECASE)
+            #if not name_match:
         
             # Get percentage weight if holding for company is found
             if name_match:
@@ -78,7 +80,6 @@ def calculate_company_exposures_for_fund(fund, num_shares):
                     with LOCK:
                         print(f"Holding ${company_holding_amount} of {company} in {fund}")
                         COMPANIES_TO_SEARCH[company] = COMPANIES_TO_SEARCH.get(company, 0.0) + company_holding_amount
-        
     return
 
 

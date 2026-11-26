@@ -1,34 +1,12 @@
+from importlib.resources import path
+from pathlib import Path
 import sqlite3
 from datetime import datetime
 import csv
 import data_scraping_utils
 
 # Declare class variables
-
 DB_STALE_DAYS = 7
-
-# tickers of funds and corresponding SEC N-PORT filings
-# [ fund ticker, sec url ]
-FUNDS = {
-    "VFIAX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000125/0000036405-25-000125.txt", # Vanguard 500 Index Fund
-    "FXAIX": "https://www.sec.gov/Archives/edgar/data/819118/000003540225001329/0000035402-25-001329.txt", # Fidelity 500 Index Fund
-    "QQQ": "https://www.sec.gov/Archives/edgar/data/1067839/000106783925000007/0001067839-25-000007.txt", # Invesco QQQ Trust
-    "VMVIX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000245/0000036405-25-000245.txt", # Vanguard Mid-cap Value Fund
-    "VIEIX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000243/0000036405-25-000243.txt", # Vanguard Extended Market Index Fund
-    "VIGIX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000244/0000036405-25-000244.txt", # Vanguard Growth Index Fund
-    "VSCIX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000242/0000036405-25-000242.txt", # Vanguard Small-Cap Index Fund
-    "VV": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000241/0000036405-25-000241.txt", # Vanguard Large-Cap Index Fund
-    "VBR": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000240/0000036405-25-000240.txt", # Vanguard Small-Cap Value Index Fund (ETF)
-    "VSIAX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000240/0000036405-25-000240.txt", # REMEMBER TO UPDATE ALL LIKE THIS # Vanguard Small-Cap Value Index Fund (Admiral Shares)
-    "VOT": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000239/0000036405-25-000239.txt", # Vanguard Mid-Cap Growth Index Fund
-    "VMGMX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000239/0000036405-25-000239.txt", # Vanguard Mid-Cap Growth Index Fund
-    "VO": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000236/0000036405-25-000236.txt", # Vanguard Mid-Cap Index Fund
-    "VIMAX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000236/0000036405-25-000236.txt", # Vanguard Mid-Cap Index Fund
-    "VTI": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000235/0000036405-25-000235.txt", # Vanguard Total Stock Market Index Fund
-    "VTSAX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000235/0000036405-25-000235.txt", # Vanguard Total Stock Market Index Fund
-    "VTV": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000234/0000036405-25-000234.txt", # Vanguard Value Index Fund
-    "VVIAX": "https://www.sec.gov/Archives/edgar/data/36405/000003640525000234/0000036405-25-000234.txt", # Vanguard Value Index Fund    "FSPSX": "https://www.sec.gov/Archives/edgar/data/819118/000003540225001381/0000035402-25-001381.txt" # Fidelity International Index Fund
-}
 
 # hard coded dummy data representing portfolios
 # [ fund ticker, number of shares, user ]
@@ -94,7 +72,9 @@ def initialize_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS funds (
         ticker TEXT PRIMARY KEY,
-        sec_url TEXT,
+        cik TEXT,
+        series_id TEXT,
+        class_id TEXT,
         nport_document TEXT,
         last_updated TEXT 
     )
@@ -124,17 +104,34 @@ def initialize_tables():
     """)
 
     # read data in from csv representing company scrape
-    with open("scraped_companies.csv", "r") as f:
+    path = Path("scraped_companies.csv")
+    if not path.exists():
+        path.touch()
+
+    with path.open("r") as f:
         reader = csv.reader(f)
         company_data = [row for row in reader]
 
+    # fund data rows from EDGAR [ cik, seriesId, classId, symbol ]
+    # wrangle data into database format [ ticker, cik, seriesId, classId ]
+    fund_data = data_scraping_utils.fetch_data_to_populate_funds()
+    fund_records = {}
+    for row in fund_data:
+        ticker = row[3]
+        fund_records[ticker] = (
+            ticker,                 # ticker
+            str(row[0]).zfill(10),  # cik
+            row[1],                 # seriesId
+            row[2],                 # classId
+        )
+
     # Insert data
-    cursor.executemany("INSERT OR IGNORE INTO funds (ticker, sec_url) VALUES (?, ?)", FUNDS.items())
+    cursor.executemany("INSERT OR IGNORE INTO funds (ticker, cik, series_id, class_id) VALUES (?, ?, ?, ?)", fund_records.values())
     cursor.executemany("INSERT OR REPLACE INTO portfolios (fund, amount, user) VALUES (?, ?, ?)", MOCK_PORTFOLIOS)
+    # detailed company data
     cursor.executemany("INSERT OR REPLACE INTO companies (name, title, lei, cusip, ticker, cik) VALUES (?, ?, ?, ?, ?, ?)", company_data)
 
     print("Successfully refreshed database tables: funds, portfolios, companies")
-
     connection.commit()
     connection.close()
     return
@@ -265,11 +262,10 @@ def refresh_all_fund_data(existing_connection=None):
     cursor.execute("SELECT ticker FROM funds WHERE (nport_document IS NULL OR nport_document = '' AND sec_url IS NOT NULL) OR last_updated IS NULL OR last_updated < datetime('now', ?)", (f"-{DB_STALE_DAYS} days",))
     stale_fund_tickers = cursor.fetchall()
 
-    stale_funds_updated = []
-
     if not stale_fund_tickers:
         print("No stale database records found")
     else:
+        stale_funds_updated = []
         for (fund,) in stale_fund_tickers:
             new_nport = data_scraping_utils.fetch_nport_from_sec_url(fund)
             if new_nport:
@@ -281,5 +277,3 @@ def refresh_all_fund_data(existing_connection=None):
         conn.close()
     
     return
-
-
