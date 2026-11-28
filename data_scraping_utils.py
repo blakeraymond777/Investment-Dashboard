@@ -4,10 +4,12 @@ import os
 import re
 import json
 import db_utils
+from pathlib import Path
 from dotenv import load_dotenv
 import time
-from urllib.parse import parse_qs, urlparse
 
+SCRAPED_COMPANY_DATA_CSV = Path("scraped_companies.csv")
+SCRAPED_FUND_DATA_CSV = Path("scraped_funds.csv")
 
 FUND_TICKERS_URL = "https://www.sec.gov/files/company_tickers_mf.json"
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -19,6 +21,7 @@ ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{acc}
 NPORT_FORMS = ("NPORT-P", "NPORT-P/A")
 
 _REQUEST_DELAY = 0.15  # seconds between calls, keeps us well under SEC's 10 req/s
+_MAX_CANDIDATES = 25   # the maximum number of filings for a given fund to check looking for an older NPORT
 _COMPANY_FILING_SUFFIXES = ("the", "grp", "group", "svcs", "services", "cos", "companies", "reit")
 
 ### Helpers ###
@@ -27,7 +30,7 @@ def _build_request_headers():
     email = os.getenv("USER_AGENT_EMAIL")
     if not email:
         raise RuntimeError("Set USER_AGENT_EMAIL in your .env (SEC requires a contact in the User-Agent).")
-    return {"User-Agent": f"PersonalInvestmentApp {email}"}
+    return {"User-Agent": f"PersonalInvestmentDashboardApp {email}"}
 
 def _sanitize_company(name):
     name = re.sub(r"[.,]|\b(inc|incorporated|corp|corporation|ltd|llc|-|holdings)\b| /(new|adr|de)/?",
@@ -37,50 +40,8 @@ def _sanitize_company(name):
     name = name.removesuffix("new").removesuffix("/")
     name = re.sub(r"/.{2,3}$", "", name)
     name = re.sub(r"[()]|holdings|hldgs", "", name)
-    for suffix in _COMPANY_FILING_SUFFIXES:
-        name = name.removesuffix(suffix)
+    for suffix in _COMPANY_FILING_SUFFIXES: name = name.removesuffix(suffix)
     return name
-
-def _parse_cik(cik):
-    """Accepts a CIK such as 1067839, '1067839', or '0001067839'."""
-    s = str(cik).strip()
-    if s.isdigit():
-        return int(s)
-    raise ValueError(f"Invalid CIK: {cik!r}")
-
-_TICKER_CACHE = {}
-# TODO remove/consolidate? - replace with logic to check local DB first 
-def _load_ticker_maps():
-    """Download SEC's ticker maps once per process."""
-    if _TICKER_CACHE:
-        return _TICKER_CACHE
-    # Mutual funds + ETFs: rows of [cik, seriesId, classId, symbol]
-    response = requests.get(FUND_TICKERS_URL, headers=_build_request_headers())
-    response.raise_for_status()
-    mf = response.json()
-
-    fields = mf["fields"]
-    i_cik, i_series, i_sym = fields.index("cik"), fields.index("seriesId"), fields.index("symbol")
-    _TICKER_CACHE["mf"] = {
-        row[i_sym].upper(): (int(row[i_cik]), row[i_series]) for row in mf["data"] if row[i_sym]
-    }
-    return _TICKER_CACHE
-
-# TODO only need to check for funds, companies don't have NPORTs
-def _resolve_ticker(ticker):
-    """
-    Map a fund ticker (VFIAX, QQQ, ...) to (cik, series_id).
-    series_id is None when only the general company-ticker map knows the symbol.
-    """
-    t = ticker.strip().upper()
-    maps = _load_ticker_maps()
-    if t in maps["mf"]:
-        return maps["mf"][t]
-    raise LookupError(f"Ticker {ticker!r} not found in SEC's fund ticker files")
-
-def _looks_like_ticker(s):
-    s = str(s).strip()
-    return bool(s) and not s.isdigit() and "/" not in s and "?" not in s
 
 def _build_txt_url(cik, accession):
     """Full-submission .txt URL for an accession number like 0000036405-26-000063."""
@@ -93,33 +54,28 @@ def _rows_from_block(block):
     n = len(cols["accessionNumber"])
     return [{k: (cols[k][i] if i < len(cols[k]) else "") for k in keys} for i in range(n)]
 
-# determine the sec url to use for the fund by checking local and then programmatically searching EDGAR if needed
-def fetch_nport_from_sec_url(fund_ticker):
-    # check if we have a url already but are just missing the nport
-    url = db_utils.get_sec_url(fund_ticker)
-    # TODO: if we don't have a url, try to get it from EDGAR (integrate)
-    if url is None:
-        print(f"No SEC url to check for {fund_ticker}")
-        return None
+# Business Logic
 
-    # Fetch the file
-    headers = _build_request_headers()
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    
-    return response.text
-
-def fetch_data_to_populate_funds():
+def fetch_fund_data():
     response = requests.get(FUND_TICKERS_URL, headers=_build_request_headers())
     response.raise_for_status()
-    
-    return response.json()["data"]
+    fund_data = response.json()["data"]
+    for row in fund_data:
+        row.insert(0, row.pop())         # move last element to the front
+        row[1] = str(row[1]).zfill(10) 
+
+    # fund data rows from EDGAR [ cik, seriesId, classId, symbol ]
+    # wrangle data into database format [ ticker, cik, seriesId, classId ] by moving last element to first position
+    print(f"Writing fund data to CSV")
+    with open(SCRAPED_FUND_DATA_CSV, "w", newline="") as f:
+        writer = csv.writer(f)
+        # write the header row and then all of the company data
+        writer.writerow(["Ticker", "CIK", "SeriesId", "ClassId"])
+        writer.writerows(fund_data)
+
 
 def fetch_data_to_populate_companies(url):
-    if not url:
-        response = requests.get(COMPANY_TICKERS_URL, headers=_build_request_headers())
-    else:
-        response = requests.get(url, headers=_build_request_headers())
+    response = requests.get(url, headers=_build_request_headers())
     response.raise_for_status()
     data = response.text
 
@@ -127,8 +83,7 @@ def fetch_data_to_populate_companies(url):
     fund_investments = re.findall(r'<invstOrSec>.*?</invstOrSec>', data, re.DOTALL)
 
     # Otherwise, we are looking at the company tickers JSON, so return it unfiltered
-    if fund_investments == []:
-        return data
+    if fund_investments == []: return data
 
     # [ name, title, lei, cusip ]
     all_funds = []
@@ -136,9 +91,7 @@ def fetch_data_to_populate_companies(url):
         this_fund = []
 
         name = re.search(r'<name>(.*?)</name>', fund_position)
-        if name: 
-            if name.group(1) == 'N/A': continue
-            this_fund.append(name.group(1))
+        if name: this_fund.append(name.group(1))
 
         title = re.search(r'<title>(.*?)</title>', fund_position)
         if title: this_fund.append(title.group(1))
@@ -207,9 +160,8 @@ def fetch_company_data():
 
                     if all_search in (name, title):
                         match_count += 1
-                        company.append(item["ticker"])
-                        # prepend zeroes to pad to length 10 for all 
-                        company.append(str(item["cik_str"]).zfill(10))
+                        company.append(item["ticker"]) 
+                        company.append(str(item["cik_str"]).zfill(10)) # prepend zeroes to pad to length 10 for all
                         break
             
             print(f"Successfully linked {match_count} company tickers and CIKs ({int(match_count/len(merged_companies)*100)}%) to representations in funds\n")
@@ -223,16 +175,14 @@ def fetch_company_data():
         
         # write the company data to a csv
         print(f"Writing company data to CSV")
-        with open("scraped_companies.csv", "w", newline="") as f:
+        with open(SCRAPED_COMPANY_DATA_CSV, "w", newline="") as f:
             writer = csv.writer(f)
-
             # write the header row and then all of the company data
             writer.writerow(["Name", "Title", "LEI", "CUSIP", "Ticker", "CIK"])
             writer.writerows(merged_companies)
 
 def list_nport_filings(cik):
     """All NPORT-P / NPORT-P/A filings for a CIK, newest first."""
-    cik = _parse_cik(cik)
     url = SUBMISSIONS_URL.format(cik=str(cik).zfill(10))
     response = requests.get(url, headers=_build_request_headers())
     response.raise_for_status()
@@ -254,8 +204,7 @@ def list_nport_filings(cik):
     found.sort(key=lambda f: (f["filingDate"], f["accessionNumber"]), reverse=True)
     return found
 
-# TODO remove/consolidate error handling - don't fail if not found
-def fetch_latest_nport_txt(url_or_cik, series_id=None, max_candidates=25):
+def fetch_latest_nport_txt(fund):
     """
     Return (txt_url, filing_dict, text) for the newest N-PORT filing.
 
@@ -264,19 +213,25 @@ def fetch_latest_nport_txt(url_or_cik, series_id=None, max_candidates=25):
     `series_id` (e.g. 'S000002839') to walk back through filings until the one
     whose <seriesId> matches is found.
     """
-    # TODO remove/consolidate?
-    if _looks_like_ticker(url_or_cik):
-        cik, resolved_series = _resolve_ticker(url_or_cik)
-        series_id = series_id or resolved_series  # narrow to this fund's series automatically
-    else:
-        cik = _parse_cik(url_or_cik)
-    filings = list_nport_filings(cik)
-    if not filings:
-        raise LookupError(
-            f"No NPORT-P filings found for CIK {cik}. Some products (e.g. unit investment trusts) are not required to file N-PORT."
-        )
+    # fund_data --> [ ticker, cik, series_id, class_id, nport_document, last_updated ] 
+    #               [ 0,       1,       2,         3,          4,             5      ]
+    fund_data = db_utils.load_fund(fund)
 
-    for filing in filings[:max_candidates]:
+    if fund_data == []: return None
+    fund_data = fund_data[0]       # strip out of tuple
+
+    # check if nport document is present
+    if fund_data[4] is not None: return fund_data[4]
+
+    cik = fund_data[1]
+    series_id = fund_data[2]
+    if cik is None: return None
+
+    print(f"Found valid CIK, but missing N-PORT document. Attempting to fetch it now.")
+    filings = list_nport_filings(fund_data[1])
+    if not filings: return None
+
+    for filing in filings[:_MAX_CANDIDATES]:
         time.sleep(_REQUEST_DELAY)
         url = _build_txt_url(cik, filing["accessionNumber"])
         response = requests.get(url, headers=_build_request_headers())
@@ -284,10 +239,7 @@ def fetch_latest_nport_txt(url_or_cik, series_id=None, max_candidates=25):
         text = response.text
 
         if series_id is None:
-            return url, filing, text
+            return text
         m = re.search(r"<seriesId>\s*(S\d+)\s*</seriesId>", text)
         if m and m.group(1).upper() == series_id.upper():
-            return url, filing, text
-
-    raise LookupError(f"No N-PORT for series {series_id} in the {max_candidates} newest filings of CIK {cik}")
-
+            return text

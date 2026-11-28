@@ -12,12 +12,10 @@ Usage: python cli.py command [<args>]
   portfolio          <user_id>
   add-holding        <user_id> <ticker> <shares>
   delete-portfolio   <user_id>
-  get-url            <ticker>
   set-url            <ticker> <url>
   delete-table       <table_name>
-  get-company-data 
-  fetch-nport-url    <ticker>
-  fetch-nport-ticker <ticker/cik>
+  get-data 
+  fetch-nport        <ticker/cik>
   refresh
   exposures          <user_id> <company>/[company ...]
 """
@@ -59,15 +57,6 @@ def main():
             else:
                 print("Aborted.")
 
-        elif cmd == "get-url":
-            url = db_utils.get_sec_url(rest[0])
-            print(url if url else f"No URL found for {rest[0]}.")
-
-        elif cmd == "set-url":
-            ticker, url = rest[0], rest[1]
-            db_utils.update_existing_fund(ticker, sec_url=url)
-            print(f"Updated SEC URL for {ticker}.")
-
         elif cmd == "delete-table":
             table_name = rest[0]
             db_utils.delete_table(table_name)
@@ -80,25 +69,21 @@ def main():
                 finance_utils.COMPANIES_TO_SEARCH = dict.fromkeys(companies, 0.0)
             finance_utils.determine_portfolio_exposure()
 
-        elif cmd == "get-company-data":
+        elif cmd == "get-data":
             data_scraping_utils.fetch_company_data()
+            data_scraping_utils.fetch_fund_data()
 
-        elif cmd == "fetch-nport-url":
-            nport = data_scraping_utils.fetch_nport_from_sec_url(rest[0])
-            if nport is None:
-                print(f"No URL found for {rest[0]}.")
-                sys.exit(1)
-            print(nport)
-
-        # retrieve nport filing from ticker or CIK (uses unintegrated nport_fetcher.py code)
-        elif cmd == "fetch-nport-ticker":
-            txt_url, filing, text = data_scraping_utils.fetch_latest_nport_txt(rest[0])
-            out = f"nports/{filing['accessionNumber']}.txt"
-            with open(out, "w", encoding="utf-8") as f:
-                f.write(text)
-            print(f"Form {filing['form']} filed {filing['filingDate']} (period {filing['reportDate']})")
-            print(f"URL:   {txt_url}")
-            print(f"Saved: {out}")
+        # retrieve nport filing from ticker or CIK
+        elif cmd == "fetch-nport":
+            fund = rest[0].upper()
+            text = data_scraping_utils.fetch_latest_nport_txt(fund)
+            if text is None:
+                print(f"No N-PORT filing found for {fund}.")
+            else:
+                out = f"nports/{fund}.txt"
+                with open(out, "w", encoding="utf-8") as f:
+                    f.write(str(text))
+                print(f"Saved: {out}")
 
         elif cmd == "refresh":
             db_utils.refresh_all_fund_data()

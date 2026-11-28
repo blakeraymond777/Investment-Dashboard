@@ -13,6 +13,7 @@ FUNDS = {}
 
 LOCK = Lock()
 
+# TODO make global variables file
 COMPANIES_TO_SEARCH_KEYS = ["Amazon.com Inc", "Another NA Company", "Netflix", "NA-Company!"]
 COMPANIES_TO_SEARCH = dict.fromkeys(COMPANIES_TO_SEARCH_KEYS, 0.0)
 
@@ -33,7 +34,7 @@ def print_exposures():
     print("| Companies with Calculated Exposures |")
     print("---------------------------------------")
     for company, amount in COMPANIES_TO_SEARCH.items():
-        print(f"{company} --> {"no exposure found" if amount == 0.0 else f"${amount}"}")
+        print(f"{company} --> {"no exposure found" if amount == 0.0 else f"${amount:,.2f}"}")
     print("---------------------------------------")
     return
 
@@ -48,19 +49,20 @@ def calculate_company_exposures_for_fund(fund, num_shares):
             print(f"Fund not found in database: {fund}")
             return
         case None:
-            nport = data_scraping_utils.fetch_nport_from_sec_url(fund)
+            print(f"Fund {fund} has no cached nport document in database. Fetching from SEC...")
+            nport = data_scraping_utils.fetch_latest_nport_txt(fund)
             if nport is None:
                 print(f"Could not find an N-PORT filing for fund: {fund}. It will not be calculated in the results")
                 return
             else:
                 # update the existing record because we fetched a new document
                 print(f"updating cached nport document for database entry of fund {fund}")
-                db_utils.update_existing_fund(fund, None, nport)
+                db_utils.update_existing_fund(fund, nport)
         case _:
             print(f"Using cached nport document for fund {fund}!")
              
     # Parse all holdings of the fund into iterable sections
-    fund_investments = re.findall(r'<invstOrSec>.*?</invstOrSec>', nport, re.DOTALL)
+    fund_investments = re.findall(r'<invstOrSec>.*?</invstOrSec>', str(nport), re.DOTALL)
 
     # loop through all fund_positions and check for each of the companies to search
     for fund_position in fund_investments:
@@ -78,7 +80,7 @@ def calculate_company_exposures_for_fund(fund, num_shares):
                 if holding_percentage:
                     company_holding_amount = float(holding_percentage.group(1)) * num_shares
                     with LOCK:
-                        print(f"Holding ${company_holding_amount} of {company} in {fund}")
+                        print(f"\tHolding ${company_holding_amount:,.2f} of {company} in {fund}")
                         COMPANIES_TO_SEARCH[company] = COMPANIES_TO_SEARCH.get(company, 0.0) + company_holding_amount
     return
 
